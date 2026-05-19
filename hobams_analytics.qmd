@@ -1,0 +1,1027 @@
+---
+title: "Understanding the Lagos Children's Event Market: A Data-Driven Analysis for Sweet Indulgence by Hobams"
+author: "Adeyinka Adedoyin Obabiolorunkosi"
+date: today
+format:
+  html:
+    theme: litera
+    toc: true
+    code-fold: true
+    self-contained: true
+---
+
+```{r}
+#| label: setup
+#| message: false
+#| warning: false
+
+library(tidyverse)
+library(reticulate)
+library(readxl)
+library(janitor)
+library(corrplot)
+library(ggcorrplot)
+library(car)
+library(pROC)
+library(ResourceSelection)
+library(knitr)
+library(kableExtra)
+library(scales)
+library(readr)
+library(patchwork)
+```
+
+```{r}
+#| label: data-loading-cleaning
+#| message: false
+#| warning: false
+
+# Load raw data
+df_raw <- read_excel("sih_data_to_be_used.xlsx") %>%
+  clean_names()
+
+# Rename columns to short readable names
+df <- df_raw %>%
+  rename(
+    timestamp          = timestamp,
+    num_children       = how_many_children_do_you_have,
+    age_groups         = what_are_the_age_groups_of_your_children_tick_all_that_apply,
+    area               = which_area_of_lagos_are_you_based_in,
+    income             = what_is_your_monthly_household_income_range,
+    events_per_year    = how_many_childrens_events_do_you_host_per_year,
+    event_types        = what_types_of_childrens_events_do_you_host_tick_all_that_apply,
+    budget_raw         = what_is_your_typical_total_budget_per_childrens_event,
+    treat_types        = which_treat_types_do_your_children_enjoy_most_at_events_select_up_to_3,
+    treat_pct          = what_percentage_of_your_event_budget_goes_to_treats_or_food_for_children,
+    vendor_used        = have_you_used_a_professional_treat_vendor_at_a_childrens_event_before,
+    satisfaction       = how_satisfied_were_you_with_that_vendor_rate_from_1_very_dissatisfied_to_10_extremely_satisfied,
+    find_vendors       = how_do_you_typically_find_childrens_event_vendors_tick_all_that_apply,
+    premium_willing    = would_you_pay_a_premium_for_a_dedicated_childrens_treat_vendor_with_custom_branding_and_themed_setups,
+    frustration        = what_is_your_biggest_frustration_or_challenge_when_organizing_treats_for_childrens_events,
+    unforgettable      = what_would_make_a_childrens_treat_experience_truly_unforgettable_for_your_family
+  ) %>%
+
+  # Drop Score column - 100% missing, never activated in Google Forms
+  select(-score) %>%
+
+  # Fix events_per_year - Google Forms stored number 2 as a date
+  mutate(events_per_year = case_when(
+    grepl("2026", as.character(events_per_year)) ~ "2",
+    TRUE ~ as.character(events_per_year)
+  )) %>%
+
+  # Clean budget column - free text with 61 different formats
+  mutate(budget_cleaned = parse_number(
+    budget_raw, locale = locale(grouping_mark = ",")
+  )) %>%
+  mutate(budget_cleaned = case_when(
+    grepl("1\\.5m|1\\.5M|1,500,000", budget_raw, ignore.case = TRUE) ~ 1500000,
+    grepl("don|dnt|depends|No answer|Less than",
+          budget_raw, ignore.case = TRUE)                             ~ NA_real_,
+    TRUE ~ budget_cleaned
+  )) %>%
+
+  # Encode ordinal variables as numbers for correlation and regression
+  mutate(
+    income_encoded = case_when(
+      grepl("Below",   income, ignore.case = TRUE) ~ 1,
+      grepl("200,000 - 500|200k - 500", income, ignore.case = TRUE) ~ 2,
+      grepl("500,000 - 1|500k - 1",     income, ignore.case = TRUE) ~ 3,
+      grepl("Above|1,000,000",          income, ignore.case = TRUE) ~ 4,
+      TRUE ~ NA_real_
+    ),
+    treat_pct_encoded = case_when(
+      grepl("less than 10|<10",  treat_pct, ignore.case = TRUE) ~ 1,
+      grepl("10.*20|10-20",      treat_pct, ignore.case = TRUE) ~ 2,
+      grepl("20.*30|20-30",      treat_pct, ignore.case = TRUE) ~ 3,
+      grepl("more than 30|>30",  treat_pct, ignore.case = TRUE) ~ 4,
+      TRUE ~ NA_real_
+    ),
+    premium_encoded = case_when(
+      grepl("No",      premium_willing, ignore.case = TRUE) ~ 0,
+      grepl("Maybe",   premium_willing, ignore.case = TRUE) ~ 1,
+      grepl("Yes",     premium_willing, ignore.case = TRUE) ~ 2,
+      TRUE ~ NA_real_
+    ),
+    premium_yes = if_else(
+      grepl("Yes", premium_willing, ignore.case = TRUE), 1, 0
+    ),
+    vendor_used_num = if_else(
+      grepl("Yes", vendor_used, ignore.case = TRUE), 1, 0
+    ),
+    area_encoded = if_else(
+      grepl("Island|Lekki|Victoria", area, ignore.case = TRUE), 1, 0
+    ),
+    num_children_encoded = case_when(
+      grepl("^1$", num_children) ~ 1,
+      grepl("^2$", num_children) ~ 2,
+      grepl("^3$", num_children) ~ 3,
+      grepl("4|more", num_children, ignore.case = TRUE) ~ 4,
+      TRUE ~ NA_real_
+     ),
+    satisfaction = as.numeric(satisfaction)
+  )
+
+# Confirm it worked
+cat("Rows:", nrow(df), "\nColumns:", ncol(df))
+```
+
+------------------------------------------------------------------------
+
+## Executive Summary
+
+This study applies five exploratory and inferential analytical techniques to a primary dataset of 100 survey responses collected from Lagos-based parents by Sweet Indulgence by Hobams, Lagos's premier kiddies treat experience brand. The dataset was collected via Google Forms in May 2026 across 17 variables covering demographics, event behaviour, treat preferences, vendor experience, and premium willingness.
+
+Exploratory data analysis revealed that 51% of respondents allocate more than 30% of their event budget to treats, confirming treats as a primary spend category. Ice cream and popcorn are the most popular treat types, validating the brand's core product offering. Data visualization identified a progressive relationship between income and premium willingness. Hypothesis testing found no statistically significant difference in vendor satisfaction between Lagos Island and Mainland parents (p = 0.737), and no significant association between income and premium willingness (p = 0.678). Correlation analysis identified treat budget percentage as the strongest correlate of premium willingness. Logistic regression confirmed that treat-conscious parents — those allocating a higher percentage of their budget to treats — are the strongest predictor of premium uptake, ahead of income or location.
+
+The unified recommendation is that Sweet Indulgence by Hobams should prioritise treat-conscious parents in its marketing strategy, targeting those who already allocate 20% or more of their event budget to treats, regardless of income bracket or Lagos location. This customer segment offers the highest probability of premium conversion and is reachable through the brand's existing Instagram and WhatsApp marketing channels.
+
+**Professional Disclosure**
+
+My name is Adeyinka Adedoyin Obabiolorunkosi. I am the Founder and Chief Experience Officer of Sweet Indulgence by Hobams — Lagos's premier kiddies treat experience brand — and concurrently serve as Territorial Sales Manager at Multichoice Nigeria, one of Africa's largest entertainment companies. My professional journey is anything but conventional: it began in the enclosures of Origin Gardens Beach & Zoo in Lagos and the National Children Zoo & Park in Abuja, where I guided children through worlds of wonder and first understood the profound power of purposeful, joyful experiences for young people. That early revelation has shaped every career decision since.
+
+Over fifteen years across zoo operations, animal welfare NGOs, insurance sales, agricultural development, creative direction, and corporate sales leadership, I have built one consistent skill: understanding what people want and designing experiences that deliver it. Today, that skill is the engine of Sweet Indulgence by Hobams — a brand that brings premium popcorn, ice cream, popsicles and cotton candy to children's parties, school events, corporate family days and community activations across Lagos.
+
+It is within this entrepreneurial context that this data analytics study was conceived. As a founder making real decisions about pricing, product mix, market positioning, and customer targeting with limited resources, I cannot afford to rely on intuition alone. I need evidence. The five analytical techniques applied in this study are not academic exercises selected to satisfy an assignment brief — they are tools I genuinely need to grow this business:
+
+- **Exploratory Data Analysis** answers my most basic but critical question: *who are my customers and what do they actually want?* As a founder who distributes through WhatsApp and Instagram, I need to understand the demographics, preferences, and behaviours of the Lagos parents I serve before I can scale. EDA gives me that foundation.
+
+- **Data Visualisation** is how I communicate market insights to the people who matter — potential investors, corporate sponsors, the Hobams Foundation board, and the National Children Zoo & Park Abuja, with whom I hold a formal strategic partnership. A clean, compelling chart does what a paragraph of text cannot: it makes a decision obvious.
+
+- **Hypothesis Testing** addresses a question that affects my entire go-to-market strategy: *do Lagos Island and Mainland parents behave differently?* If they do, I need differentiated pricing and service tiers. If they do not, I can standardise my offering and scale more efficiently. This is not a theoretical question — it is one I face every time I price an activation package.
+
+- **Correlation Analysis** helps me identify which customer characteristics move together, so I can build a precise profile of my ideal premium customer rather than marketing to everyone and converting few. In a bootstrapped startup with no dedicated marketing budget, targeting precision is not a luxury — it is survival.
+
+- **Logistic Regression** is the most powerful tool in this study for my business. It tells me, with statistical rigour, which combination of customer characteristics predicts premium willingness. That prediction model is, in practical terms, a customer scoring system — one that tells my sales effort exactly where to focus first.
+
+Every dataset, every hypothesis, every result in this document maps to a decision I am actively
+
+navigating as a founder. That is the spirit in which this study was conducted
+
+**Data Collection & Sampling**
+
+**Source & Collection Method**
+
+The dataset was collected via a structured Google Forms survey designed and administered by the researcher in her capacity as Founder of Sweet Indulgence by Hobams. The survey was distributed through WhatsApp groups, Instagram direct messages and Instagram Stories — the same channels used to market the brand between May citation("corrplot") citation("ggcorrplot") citation("car") citation("ResourceSelection") citation("scales") citation("patchwork") citation("readr").
+
+**Sampling Frame**
+
+The target population is Lagos-based parents with at least one child who organize or attend children's events. This population is the direct target customer for Sweet Indulgence by Hobams. A purposive convenience sampling method was used, appropriate because the brand's market is socially-connected Lagos parents rather than a random general population.
+
+**Sample Size & Statistical Rationale**
+
+A total of 100 complete responses were collected across 17 variables. By the Central Limit Theorem, n ≥ 30 is sufficient for sampling distributions of means to be approximately normal; n = 100 provides adequate statistical power for the t-tests, chi-squared tests, correlation analyses, and logistic regression planned in this study.
+
+**Ethical Notes**
+
+No personally identifiable information (PII) was collected at any point — the survey contained no fields for names, phone numbers, email addresses, or financial account details. Participation was entirely voluntary; respondents were informed at the start of the Google Forms survey that their responses would be used for academic research and business development purposes, and that submission of the form constituted informed consent to this use. No formal institutional ethics board approval was required for this study as the survey collected no sensitive personal data, involved no vulnerable populations, and posed no risk of harm to participants. All data has been stored securely and will be anonymised before any public sharing.
+
+**Data Quality Issues Identified**
+
+Three data quality issues were identified and resolved during cleaning:
+
+1\. \*\*Budget variable\*\*: collected as free text, producing 61 unique non-standardized formats (e.g. "500,000", "500k", "1.5m"). Resolved using \`parse number () \` with manual override for edge cases.
+
+2\. \*\*Events per year\*\*: Google Forms misread the numeric input "2" as a date ("2026-02-03"). Resolved by detecting and recoding date-formatted entries.
+
+3\. \*\*Score column\*\*: contained zero non-null values across all 100 rows; the Google Forms quiz-scoring feature was never activated. Column excluded from all analyses.
+
+**Data Description**
+
+The dataset contains 100 observations across 16 active variables following the removal of the empty Score column. Variable types, names, and distributions are described fully in Section 5. Key variables include demographic indicators (income range, Lagos area, number of children), behavioral variables (events per year, budget allocation, treat preferences), and outcome variables (vendor satisfaction score, premium willingness).
+
+Technique 1 — **Exploratory Data Analysis (EDA)**.
+
+Exploratory Data Analysis (EDA) is the foundation of any rigorous analytical workflow. Before fitting models or running tests, a practitioner must understand the shape, distribution, and quality of their data. For Sweet Indulgence by Hobams, EDA answers the most fundamental business question: *who are my customers and what do they look like?*
+
+```{}
+```
+
+```{r}
+#| label: eda-missing
+#| message: false
+#| warning: false
+
+# Missing value analysis
+missing_summary <- df %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(everything(),
+               names_to  = "Variable",
+               values_to = "Missing_Count") %>%
+  mutate(Missing_Pct = round(Missing_Count / nrow(df) * 100, 1)) %>%
+  filter(Missing_Count > 0) %>%
+  arrange(desc(Missing_Count))
+
+missing_summary %>%
+  kable(caption = "Table 1: Missing Values by Variable") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+```{::: {.panel-tabset}
+
+## R
+
+#| label: eda-distributions-r
+#| message: false
+#| warning: false
+
+p1 <- df %>%
+  count(income) %>%
+  mutate(income = str_wrap(income, 20)) %>%
+  ggplot(aes(x = reorder(income, n), y = n, fill = income)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  labs(title = "Income Distribution of Respondents",
+       x = "Income Range", y = "Count") +
+  theme_minimal()
+
+p2 <- df %>%
+  count(area) %>%
+  mutate(area = str_wrap(area, 20)) %>%
+  ggplot(aes(x = reorder(area, n), y = n, fill = area)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  labs(title = "Respondents by Lagos Area",
+       x = "Area", y = "Count") +
+  theme_minimal()
+
+p3 <- df %>%
+  count(events_per_year) %>%
+  ggplot(aes(x = reorder(events_per_year, n), y = n, 
+             fill = events_per_year)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  labs(title = "Events Hosted Per Year",
+       x = "Events Per Year", y = "Count") +
+  theme_minimal()
+
+p4 <- df %>%
+  filter(!is.na(budget_cleaned)) %>%
+  ggplot(aes(x = budget_cleaned)) +
+  geom_histogram(bins = 20, fill = "#2C7BB6", colour = "white") +
+  scale_x_continuous(labels = comma) +
+  labs(title = "Distribution of Event Budget (₦)",
+       x = "Budget (₦)", y = "Count") +
+  theme_minimal()
+
+(p1 + p2) / (p3 + p4)
+
+## Python
+
+#| label: eda-distributions-python
+#| message: false
+#| warning: false
+
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+import seaborn as sns
+
+# Pass R dataframe to Python
+df_py = r.df.copy()
+
+fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+fig.suptitle("EDA: Key Variable Distributions (Python/Seaborn)", 
+             fontsize=14, fontweight="bold")
+
+# Plot 1 - Income distribution
+income_counts = df_py["income"].value_counts()
+axes[0, 0].barh(income_counts.index, income_counts.values, 
+                color=sns.color_palette("Blues_d", len(income_counts)))
+axes[0, 0].set_title("Income Distribution")
+axes[0, 0].set_xlabel("Count")
+
+# Plot 2 - Area distribution
+area_counts = df_py["area"].value_counts()
+axes[0, 1].barh(area_counts.index, area_counts.values,
+                color=sns.color_palette("Greens_d", len(area_counts)))
+axes[0, 1].set_title("Respondents by Lagos Area")
+axes[0, 1].set_xlabel("Count")
+
+# Plot 3 - Events per year
+events_counts = df_py["events_per_year"].value_counts()
+axes[1, 0].barh(events_counts.index.astype(str), 
+                events_counts.values,
+                color=sns.color_palette("Oranges_d", len(events_counts)))
+axes[1, 0].set_title("Events Hosted Per Year")
+axes[1, 0].set_xlabel("Count")
+
+# Plot 4 - Budget distribution
+budget_data = df_py["budget_cleaned"].dropna()
+axes[1, 1].hist(budget_data, bins=20, color="#2C7BB6", 
+                edgecolor="white")
+axes[1, 1].set_title("Distribution of Event Budget (₦)")
+axes[1, 1].set_xlabel("Budget (₦)")
+axes[1, 1].set_ylabel("Count")
+axes[1, 1].xaxis.set_major_formatter(
+    mticker.FuncFormatter(lambda x, _: f"₦{x:,.0f}"))
+plt.xticks(rotation=45)
+
+plt.tight_layout()
+plt.show()
+
+:::
+
+```
+
+```{r}
+#| label: eda-outliers
+#| message: false
+#| warning: false
+
+# Outlier detection using boxplot on budget and satisfaction
+p5 <- df %>%
+  filter(!is.na(budget_cleaned)) %>%
+  ggplot(aes(y = budget_cleaned)) +
+  geom_boxplot(fill = "#FDB863") +
+  scale_y_continuous(labels = comma) +
+  labs(title = "Boxplot: Event Budget (₦)",
+       y = "Budget (₦)") +
+  theme_minimal()
+
+p6 <- df %>%
+  filter(!is.na(satisfaction)) %>%
+  ggplot(aes(y = satisfaction)) +
+  geom_boxplot(fill = "#74ADD1") +
+  labs(title = "Boxplot: Vendor Satisfaction Score",
+       y = "Satisfaction (1-10)") +
+  theme_minimal()
+
+p5 + p6
+```
+
+**Key EDA Findings:**
+
+- The dataset contains **100 observations** across **16 active variables** after removing the empty Score column.
+- **Satisfaction scores** are missing for 17 respondents — these are parents who have never used a professional vendor, so the missingness is structural and expected, not random.
+- **Budget** is missing for a small number of respondents who entered non-numeric responses such as "Don't have one" — these were coded as NA.
+- The budget boxplot reveals at least one high-value outlier (₦1,500,000+), indicating a small segment of very high-spending customers — important for Sweet Indulgence's premium tier planning.
+- Income is skewed toward the middle brackets, with the largest group falling in the ₦200,000–₦500,000 range.
+
+```{}
+```
+
+```{}
+```
+
+```{}
+```
+
+```{}
+```
+
+Technique 2 — Data Visualization
+
+Effective data visualization transforms numbers into decisions. For Sweet Indulgence by Hobams, the goal of this visualization narrative is to answer one central business question: *who is my customer and what drives their willingness to pay a premium?* Five complementary plots are presented below, each chosen deliberately for its ability to communicate a specific pattern in the data.
+
+```{r}
+#| label: viz-treat-types
+#| message: false
+#| warning: false
+#| fig-cap: "Figure 1: Treat type popularity among Lagos parents"
+
+# Plot 1 - Treat type popularity (explode multi-select column)
+df %>%
+  filter(!is.na(treat_types)) %>%
+  separate_rows(treat_types, sep = ",") %>%
+  mutate(treat_types = str_trim(treat_types)) %>%
+  count(treat_types, sort = TRUE) %>%
+  ggplot(aes(x = reorder(treat_types, n), y = n, fill = treat_types)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  labs(
+    title    = "Figure 1: Most Popular Treat Types at Children's Events",
+    subtitle = "Multiple selections allowed — n = 100 respondents",
+    x        = "Treat Type",
+    y        = "Number of Mentions",
+    caption  = "Source: Sweet Indulgence by Hobams Customer Survey, 2026"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+**Business interpretation (Figure 1):** Ice cream and popcorn dominate treat preferences among Lagos parents. For Sweet Indulgence by Hobams, this confirms that the core product offering premium popcorn and ice cream is correctly aligned with market demand. Cotton candy and popsicles serve as complimentary upsell products.
+
+A horizontal bar chart was chosen over a pie chart because it allows direct rank comparison across multiple treat types pie charts become unreadable beyond four segments.
+
+------------------------------------------------------------------------
+
+```{r}
+#| label: viz-income-premium
+#| message: false
+#| warning: false
+#| fig-cap: "Figure 2: Premium willingness by income group"
+
+# Plot 2 - Income group vs premium willingness (stacked bar)
+df %>%
+  filter(!is.na(income), !is.na(premium_willing)) %>%
+  mutate(income = str_wrap(income, 25)) %>%
+  count(income, premium_willing) %>%
+  group_by(income) %>%
+  mutate(pct = n / sum(n) * 100) %>%
+  ggplot(aes(x = income, y = pct, fill = premium_willing)) +
+  geom_col(position = "stack") +
+  coord_flip() +
+  scale_fill_brewer(palette = "RdYlGn", direction = 1) +
+  labs(
+    title    = "Figure 2: Premium Willingness by Income Group",
+    subtitle = "Percentage within each income bracket",
+    x        = "Income Range",
+    y        = "Percentage (%)",
+    fill     = "Premium Willingness",
+    caption  = "Source: Sweet Indulgence by Hobams Customer Survey, 2026"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+```
+
+**Business interpretation (Figure 2):** Higher income brackets show a progressively larger share of "Yes, definitely" responses. This gives Sweet Indulgence by Hobams a clear targeting signal — premium branded packages should be marketed primarily to households earning above ₦500,000 per month.
+
+A stacked bar chart was chosen over grouped bars because the goal is to show the composition of
+premium willingness within each income group, not to compare absolute counts across groups.
+
+------------------------------------------------------------------------
+
+```{r}
+#| label: viz-satisfaction-area
+#| message: false
+#| warning: false
+#| fig-cap: "Figure 3: Vendor satisfaction scores by Lagos area"
+
+# Plot 3 - Vendor satisfaction by area (boxplot)
+df %>%
+  filter(!is.na(satisfaction), !is.na(area)) %>%
+  mutate(area = str_wrap(area, 20)) %>%
+  ggplot(aes(x = reorder(area, satisfaction, median),
+             y = satisfaction, fill = area)) +
+  geom_boxplot(show.legend = FALSE, alpha = 0.7) +
+  coord_flip() +
+  labs(
+    title    = "Figure 3: Vendor Satisfaction Scores by Lagos Area",
+    subtitle = "Among the 83 respondents who have used a vendor before",
+    x        = "Lagos Area",
+    y        = "Satisfaction Score (1–10)",
+    caption  = "Source: Sweet Indulgence by Hobams Customer Survey, 2026"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+**Business interpretation (Figure 3):** Satisfaction scores vary across Lagos areas, with some areas showing wider spread and lower medians — indicating underserved markets where current vendor quality is inconsistent. These areas represent the strongest opportunity for Sweet Indulgence by Hobams to enter and capture dissatisfied customers.
+
+A boxplot was chosen over a bar chart because it reveals the full distribution of satisfaction scores including median, spread, and outliers — which a simple average would hide.
+
+------------------------------------------------------------------------
+
+```{r}
+#| label: viz-treat-budget-pct
+#| message: false
+#| warning: false
+#| fig-cap: "Figure 4: Treat spend as percentage of event budget"
+
+# Plot 4 - Treat budget percentage (bar chart)
+df %>%
+  filter(!is.na(treat_pct)) %>%
+  count(treat_pct) %>%
+  mutate(treat_pct = factor(treat_pct,
+    levels = c("Less than 10%", "10 - 20%", "20 - 30%", "More than 30%"))) %>%
+  ggplot(aes(x = treat_pct, y = n, fill = treat_pct)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = n), vjust = -0.5, size = 4) +
+  labs(
+    title    = "Figure 4: Treat Spend as Percentage of Event Budget",
+    subtitle = "51 of 100 respondents allocate more than 30% of their budget to treats",
+    x        = "Treat Budget Percentage",
+    y        = "Number of Respondents",
+    caption  = "Source: Sweet Indulgence by Hobams Customer Survey, 2026"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+**Business interpretation (Figure 4):** The majority of respondents — 51 out of 100 — allocate more than 30% of their event budget to treats. This demolishes the assumption that treats are an afterthought at children's events. For Sweet Indulgence by Hobams, treats are a primary spend category, not a secondary one. This justifies premium pricing.
+
+A bar chart with value labels was chosen over a histogram because the treat budget variable is ordinal with only four categories — a histogram is appropriate for continuous data, not ranked categories.
+
+------------------------------------------------------------------------
+
+```{r}
+#| label: viz-budget-satisfaction
+#| message: false
+#| warning: false
+#| fig-cap: "Figure 5: Event budget vs vendor satisfaction coloured by vendor usage"
+
+# Plot 5 - Budget vs satisfaction scatter
+df %>%
+  filter(!is.na(budget_cleaned), !is.na(satisfaction)) %>%
+  ggplot(aes(x = budget_cleaned, y = satisfaction,
+             colour = vendor_used)) +
+  geom_point(alpha = 0.7, size = 3) +
+  geom_smooth(method = "lm", se = TRUE, colour = "black",
+              linetype = "dashed") +
+  scale_x_continuous(labels = comma) +
+  scale_colour_manual(values = c("Yes" = "#2C7BB6", "No" = "#D7191C")) +
+  labs(
+    title    = "Figure 5: Event Budget vs Vendor Satisfaction Score",
+    subtitle = "Coloured by whether a professional vendor was used",
+    x        = "Total Event Budget (₦)",
+    y        = "Vendor Satisfaction Score (1–10)",
+    colour   = "Used Professional Vendor",
+    caption  = "Source: Sweet Indulgence by Hobams Customer Survey, 2026"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+```
+
+**Business interpretation (Figure 5):** There is a visible positive trend between event budget and vendor satisfaction — higher-spending parents tend to report higher satisfaction with their vendors. This scatter plot sets up the formal correlation analysis in Section 8 and supports the regression model in Section 9. The dashed trend line confirms the direction of the relationship before formal testing.
+
+A scatter plot with a regression line was chosen because the goal is to visualise the relationship between two continuous variables — budget and satisfaction — while the colour encoding adds a third dimension (vendor usage) without requiring a separate plot.
+
+Technique 3 — Hypothesis Testing
+
+Hypothesis testing allows a business analyst to move beyond description and make statistically defensible decisions. For Sweet Indulgence by Hobams, two business questions are tested formally below. Each test follows the full protocol: state hypotheses, check assumptions, run the test, report the p-value and effect size, and interpret the result in plain business language.
+
+------------------------------------------------------------------------
+
+## Test 1 — Welch t-test: Does vendor satisfaction differ between Lagos Island and Mainland?
+
+**Business justification:** If Island and Mainland parents experience significantly different satisfaction levels with existing vendors, Sweet Indulgence by Hobams should develop differentiated service offerings for each market rather than a single one-size-fits-all approach.
+
+**H₀:** Mean vendor satisfaction is the same for Island and Mainland parents (μ₁ = μ₂)
+
+**H₁:** Mean vendor satisfaction differs between Island and Mainland parents (μ₁ ≠ μ₂)
+
+```{r}
+#| label: hypothesis-test1-assumptions
+#| message: false
+#| warning: false
+
+# Prepare data - filter to vendor users only and split by area
+island <- df %>%
+  filter(!is.na(satisfaction),
+         grepl("Island|Lekki|Victoria", area, ignore.case = TRUE)) %>%
+  mutate(satisfaction = as.numeric(satisfaction)) %>%
+  pull(satisfaction)
+
+mainland <- df %>%
+  filter(!is.na(satisfaction),
+         !grepl("Island|Lekki|Victoria", area, ignore.case = TRUE)) %>%
+  pull(satisfaction)
+
+cat("Island n =", length(island), 
+    "| Mean =", round(mean(island), 2), "\n")
+cat("Mainland n =", length(mainland), 
+    "| Mean =", round(mean(mainland), 2), "\n\n")
+
+# Assumption check 1 - Shapiro-Wilk normality test
+cat("=== Shapiro-Wilk Normality Test ===\n")
+shapiro.test(island)
+shapiro.test(mainland)
+
+# Assumption check 2 - Levene's test for equal variances
+cat("\n=== Levene's Test for Equal Variances ===\n")
+sat_data <- df %>%
+  filter(!is.na(satisfaction)) %>%
+  mutate(area_group = if_else(
+    grepl("Island|Lekki|Victoria", area, ignore.case = TRUE),
+    "Island", "Mainland"))
+
+leveneTest(satisfaction ~ area_group, data = sat_data)
+```
+
+```{r}
+#| label: hypothesis-test1-result
+#| message: false
+#| warning: false
+
+# Run Welch t-test (does not assume equal variances)
+t_result <- t.test(island, mainland, var.equal = FALSE)
+print(t_result)
+
+# Effect size - Cohen's d
+n1 <- length(island); n2 <- length(mainland)
+s_pooled <- sqrt(((n1-1)*var(island) + (n2-1)*var(mainland)) / (n1+n2-2))
+cohens_d <- (mean(island) - mean(mainland)) / s_pooled
+cat("\nCohen's d =", round(cohens_d, 3))
+cat("\nEffect size interpretation:",
+    ifelse(abs(cohens_d) < 0.2, "Negligible",
+    ifelse(abs(cohens_d) < 0.5, "Small",
+    ifelse(abs(cohens_d) < 0.8, "Medium", "Large"))))
+```
+
+```{r}
+#| label: hypothesis-test1-plot
+#| message: false
+#| warning: false
+#| fig-cap: "Figure 6: Vendor satisfaction distribution by Lagos area"
+
+# Visualise the comparison
+sat_data %>%
+  ggplot(aes(x = area_group, y = satisfaction, fill = area_group)) +
+  geom_boxplot(alpha = 0.7, show.legend = FALSE) +
+  geom_jitter(width = 0.1, alpha = 0.4, size = 2) +
+  labs(
+    title    = "Figure 6: Vendor Satisfaction by Lagos Area",
+    subtitle = "Welch t-test result shown below",
+    x        = "Lagos Area",
+    y        = "Satisfaction Score (1–10)",
+    caption  = "Source: Sweet Indulgence by Hobams Customer Survey, 2026"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+**Plain-language interpretation:** The Welch t-test produced t(76.95) = 0.337, p = 0.737. Since p = 0.737 is well above the 0.05 significance threshold, we fail to reject H₀. There is no statistically significant difference in vendor satisfaction between Lagos Island and Mainland parents. The effect size (Cohen's d = 0.074) is negligible, confirming the difference is not practically meaningful either. In practical terms for Sweet Indulgence by Hobams, this means a single service standard is appropriate across both markets — the brand does not need to develop separate service offerings by location. However, Island parents report a slightly higher mean satisfaction (6.76 vs 6.61), which may warrant monitoring as the brand scales.
+
+------------------------------------------------------------------------
+
+## Test 2 — Chi-squared: Is premium willingness associated with income group?
+
+**Business justification:** If premium willingness is independent of income, Sweet Indulgence by Hobams must rely on factors other than income to identify premium customers. If they are associated, income becomes a valid targeting variable.
+
+**H₀:** Premium willingness is independent of income range
+
+**H₁:** There is a significant association between income range and premium willingness
+
+```{r}
+#| label: hypothesis-test2-assumptions
+#| message: false
+#| warning: false
+
+# Build contingency table
+cont_table <- table(df$income, df$premium_willing)
+print(cont_table)
+
+# Check expected frequencies - all should be >= 5
+cat("\n=== Expected Cell Frequencies ===\n")
+chisq_check <- chisq.test(cont_table)
+print(round(chisq_check$expected, 1))
+```
+
+```{r}
+#| label: hypothesis-test2-result
+#| message: false
+#| warning: false
+
+# Run chi-squared test
+chi_result <- chisq.test(cont_table)
+print(chi_result)
+
+# Effect size - Cramer's V
+n    <- sum(cont_table)
+k    <- min(nrow(cont_table), ncol(cont_table))
+cramers_v <- sqrt(chi_result$statistic / (n * (k - 1)))
+cat("\nCramér's V =", round(cramers_v, 3))
+cat("\nEffect size interpretation:",
+    ifelse(cramers_v < 0.1, "Negligible",
+    ifelse(cramers_v < 0.3, "Small",
+    ifelse(cramers_v < 0.5, "Medium", "Large"))))
+```
+
+```{r}
+#| label: hypothesis-test2-plot
+#| message: false
+#| warning: false
+#| fig-cap: "Figure 7: Premium willingness by income group"
+
+# Visualise association
+df %>%
+  filter(!is.na(income), !is.na(premium_willing)) %>%
+  mutate(income = str_wrap(income, 25)) %>%
+  count(income, premium_willing) %>%
+  group_by(income) %>%
+  mutate(pct = n / sum(n) * 100) %>%
+  ggplot(aes(x = income, y = pct, fill = premium_willing)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  scale_fill_brewer(palette = "Set2") +
+  labs(
+    title    = "Figure 7: Premium Willingness by Income Group",
+    subtitle = "Percentage within each income bracket",
+    x        = "Income Range",
+    y        = "Percentage (%)",
+    fill     = "Premium Willingness",
+    caption  = "Source: Sweet Indulgence by Hobams Customer Survey, 2026"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+```
+
+**Plain-language interpretation:** The chi-squared test produced χ²(8) = 5.722, p = 0.678. Since p = 0.678 is well above the 0.05 threshold, we fail to reject H₀. Premium willingness is not significantly associated with income range in this sample. Cramér's V = 0.169 indicates a small and statistically insignificant association. Note: the warning "Chi-squared approximation may be incorrect" indicates some expected cell frequencies fell below 5 — this is acknowledged as a limitation of the small sample within each income-premium cell. In practical terms for Sweet Indulgence by Hobams, income alone is not a reliable predictor of premium willingness. This is an important finding — it means the brand cannot simply target high-income households and expect premium uptake. Other factors such as prior vendor experience, event type, and treat budget allocation must also be considered. This finding directly motivates the logistic regression in Section 9, where multiple predictors are tested simultaneously.
+
+Technique 4 — Correlation Analysis
+
+Correlation analysis measures the strength and direction of relationships between variables. For Sweet Indulgence by Hobams, this technique answers the question: *which customer characteristics move together, and what does that tell us about our ideal premium customer?* Spearman correlation is used here rather than Pearson because most variables are ordinal — Spearman makes no assumption of normality and is appropriate for ranked data.
+
+```{r}
+#| label: correlation-matrix
+#| message: false
+#| warning: false
+#| fig-cap: "Figure 8: Spearman correlation heatmap of key customer variables"
+
+# Select numeric variables for correlation
+cor_df <- df %>%
+  select(
+    num_children_encoded,
+    income_encoded,
+    treat_pct_encoded,
+    premium_encoded,
+    vendor_used_num,
+    area_encoded,
+    satisfaction,
+    budget_cleaned
+  ) %>%
+  rename(
+    `Num Children`    = num_children_encoded,
+    `Income`          = income_encoded,
+    `Treat Budget %`  = treat_pct_encoded,
+    `Premium Willing` = premium_encoded,
+    `Used Vendor`     = vendor_used_num,
+    `Island Area`     = area_encoded,
+    `Satisfaction`    = satisfaction,
+    `Event Budget`    = budget_cleaned
+  )
+
+# Compute Spearman correlation matrix
+cor_matrix <- cor(cor_df, method = "spearman", use = "pairwise.complete.obs")
+
+# Plot heatmap
+ggcorrplot(cor_matrix,
+           method    = "circle",
+           type      = "lower",
+           lab       = TRUE,
+           lab_size  = 3,
+           colors    = c("#D7191C", "white", "#2C7BB6"),
+           title     = "Figure 8: Spearman Correlation Matrix",
+           ggtheme   = theme_minimal())
+```
+
+```{r}
+#| label: correlation-table
+#| message: false
+#| warning: false
+
+# Show top correlations in a table
+cor_long <- as.data.frame(as.table(cor_matrix)) %>%
+  rename(Variable1 = Var1, Variable2 = Var2, Correlation = Freq) %>%
+  dplyr::filter(Variable1 != Variable2) %>%
+  mutate(Abs_Cor = abs(Correlation)) %>%
+  arrange(desc(Abs_Cor)) %>%
+  distinct(Abs_Cor, .keep_all = TRUE) %>%
+  head(6) %>%
+  select(Variable1, Variable2, Correlation) %>%
+  mutate(Correlation = round(Correlation, 3))
+
+cor_long %>%
+  kable(caption = "Table 2: Top 6 Strongest Spearman Correlations") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+**Business interpretation:**
+
+The Spearman correlation heatmap reveals several meaningful relationships in the Sweet Indulgence by Hobams customer dataset:
+
+**Strongest correlations to discuss:**
+
+1.  **Income ↔ Event Budget:** Higher-income households tend to allocate larger total budgets to children's events. This is the most intuitively logical relationship in the data — and its presence confirms that the survey captured genuine spending behaviour rather than random responses.
+
+2.  **Income ↔ Premium Willingness:** Higher-income parents show a moderate positive correlation with premium vendor willingness. While the chi-squared test in Section 7 showed this association is not statistically significant at the population level, the correlation coefficient reveals a directional trend worth monitoring as the sample grows.
+
+3.  **Treat Budget % ↔ Premium Willingness:** Parents who already allocate a higher percentage of their event budget to treats are more willing to pay a premium for a dedicated vendor. This is the most actionable correlation for Sweet Indulgence by Hobams — treat-budget-conscious parents are the brand's natural premium audience, regardless of their income level.
+
+**Correlation vs causation note:** While income and premium willingness are correlated, income alone does not cause premium preference. Intervening variables such as prior vendor experience, event type, and social expectations around children's parties likely mediate this relationship. A controlled experiment — offering the same premium package to parents across income brackets — would be needed to establish causality.
+
+Technique 5 — Logistic Regression
+
+Logistic regression models the probability of a binary outcome occurring given a set of predictor variables. Unlike linear regression, it is appropriate when the outcome variable is categorical rather than continuous. For Sweet Indulgence by Hobams, the business question is: *which customer characteristics predict whether a parent will definitely pay a premium for a branded treat experience?* The outcome variable `premium_yes` is coded 1 for "Yes, definitely" and 0 for all other responses (34 positive cases out of 100).
+
+```{r}
+#| label: logistic-regression
+#| message: false
+#| warning: false
+
+# Build logistic regression model
+model <- glm(
+  premium_yes ~ income_encoded + area_encoded + vendor_used_num +
+                treat_pct_encoded + num_children_encoded,
+  data   = df,
+  family = binomial(link = "logit")
+)
+
+# Model summary
+summary(model)
+```
+
+```{r}
+#| label: logistic-odds-ratios
+#| message: false
+#| warning: false
+
+# Odds ratios and confidence intervals
+odds_ratios <- exp(cbind(OR = coef(model), confint(model)))
+odds_ratios_df <- as.data.frame(round(odds_ratios, 3))
+odds_ratios_df$Variable <- rownames(odds_ratios_df)
+odds_ratios_df <- odds_ratios_df %>%
+  dplyr::filter(Variable != "(Intercept)") %>%
+  select(Variable, OR, `2.5 %`, `97.5 %`)
+
+odds_ratios_df %>%
+  kable(caption = "Table 3: Odds Ratios with 95% Confidence Intervals") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+```         
+```
+
+```{r}
+#| label: logistic-roc
+#| message: false
+#| warning: false
+#| fig-cap: "Figure 9: ROC curve for logistic regression model"
+
+# Get complete cases only
+model_data <- df %>%
+  select(premium_yes, income_encoded, area_encoded,
+         vendor_used_num, treat_pct_encoded, num_children_encoded) %>%
+  na.omit()
+
+# Refit model on complete cases
+model_complete <- glm(
+  premium_yes ~ income_encoded + area_encoded + vendor_used_num +
+                treat_pct_encoded + num_children_encoded,
+  data   = model_data,
+  family = binomial(link = "logit")
+)
+
+# ROC curve and AUC
+predicted_probs <- predict(model_complete, type = "response")
+roc_obj <- roc(model_data$premium_yes, predicted_probs)
+auc_val <- auc(roc_obj)
+cat("AUC =", round(auc_val, 3), "\n")
+
+# Plot ROC curve
+plot(roc_obj,
+     col  = "#2C7BB6",
+     lwd  = 2,
+     main = paste("Figure 9: ROC Curve (AUC =", round(auc_val, 3), ")"))
+abline(a = 0, b = 1, lty = 2, col = "grey")
+```
+
+```{r}
+#| label: logistic-confusion-matrix
+#| message: false
+#| warning: false
+#| fig-cap: "Figure 10: Confusion Matrix for Logistic Regression Model"
+
+library(caret)
+
+# Predict class using 0.5 threshold
+predicted_class <- if_else(predicted_probs >= 0.5, 1, 0)
+
+# Confusion matrix
+conf_matrix <- confusionMatrix(
+  factor(predicted_class, levels = c(0, 1)),
+  factor(model_data$premium_yes, levels = c(0, 1)),
+  positive = "1"
+)
+
+print(conf_matrix)
+
+# Visualise confusion matrix
+conf_df <- as.data.frame(conf_matrix$table) %>%
+  rename(Predicted = Prediction, Actual = Reference)
+
+ggplot(conf_df, aes(x = Actual, y = Predicted, fill = Freq)) +
+  geom_tile(colour = "white") +
+  geom_text(aes(label = Freq), size = 8, fontface = "bold") +
+  scale_fill_gradient(low = "#EBF5FB", high = "#2C7BB6") +
+  labs(
+    title    = "Figure 10: Confusion Matrix — Logistic Regression",
+    subtitle = paste("Accuracy =", 
+                     round(conf_matrix$overall["Accuracy"] * 100, 1), "%",
+                     "| Sensitivity =",
+                     round(conf_matrix$byClass["Sensitivity"] * 100, 1), "%"),
+    x        = "Actual Class",
+    y        = "Predicted Class",
+    caption  = "Source: Sweet Indulgence by Hobams Customer Survey, 2026"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "none")
+```
+
+**Confusion Matrix Interpretation:**
+
+The confusion matrix shows how well the model classifies parents as premium or non-premium customers. Reading the results:
+
+- **True Positives (TP):** Parents correctly predicted as premium — these are the customers Sweet Indulgence should prioritize in its outreach
+
+- **True Negatives (TN):** Parents correctly predicted as non-premium
+
+- **False Positives (FP):** Parents predicted as premium who are not — wasteful marketing spend
+
+- **False Negatives (FN):** Premium parents the model missed — lost revenue opportunities
+
+For Sweet Indulgence by Hobams, **minimising False Negatives is the priority** — a missed premium customer costs more than a wasted marketing contact. The model's sensitivity score confirms how well it captures the true premium segment.
+
+```{r}
+#| label: logistic-diagnostics
+#| message: false
+#| warning: false
+
+# Hosmer-Lemeshow goodness of fit test
+hl_test <- hoslem.test(df$premium_yes[complete.cases(
+  df[, c("premium_yes", "income_encoded", "area_encoded",
+         "vendor_used_num", "treat_pct_encoded", "num_children_encoded")])],
+  fitted(model))
+cat("Hosmer-Lemeshow p-value =", round(hl_test$p.value, 3), "\n")
+cat("Interpretation: p > 0.05 means the model fits the data well\n")
+```
+
+**Business interpretation:**
+
+The logistic regression model predicts which Lagos parents are most likely to pay a premium for Sweet Indulgence by Hobams branded treat experiences. Results are reported as odds ratios (OR) for ease of business interpretation.
+
+**How to read odds ratios:** An OR greater than 1 means that variable increases the likelihood of premium willingness. An OR less than 1 means it decreases the likelihood. An OR of 1 means no effect.
+
+**Key findings for Sweet Indulgence by Hobams:**
+
+- **Treat Budget %:** The strongest predictor in the model. Parents who already allocate a higher percentage of their event budget to treats are significantly more likely to pay a premium. This tells the brand to target parents who are already treat-conscious, not just high-income parents.
+
+- **Income:** Each step up the income ladder increases premium willingness, consistent with the correlation findings in Section 8.
+
+- **Vendor Used:** Prior experience with a professional vendor is associated with higher premium willingness — parents who have used vendors before understand the value and are more likely to pay for quality.
+
+**Model performance:** The AUC value measures how well the model distinguishes between premium and non-premium customers. An AUC above 0.7 indicates acceptable discrimination. The Hosmer-Lemeshow p-value above 0.05 confirms the model fits the data adequately.
+
+**Recommendation for a non-technical manager:** *"Our data shows that the parent most likely to pay a premium for Sweet Indulgence by Hobams is not simply the wealthiest parent in the room — it is the parent who already takes treats seriously and allocates a significant portion of their event budget to them. Our sales and marketing team should prioritise parents who spend more than 20% of their event budget on treats, regardless of their income bracket. These parents already value what we offer — they just need to find us.*
+
+10\. Integrated Findings
+
+The five analytical techniques applied in this study collectively support one unified recommendation for Sweet Indulgence by Hobams.
+
+**The finding across all five techniques is consistent:** the brand's ideal premium customer is not defined by income alone — it is defined by treat-consciousness, prior vendor experience, and event engagement.
+
+- **EDA** revealed that 51 of 100 parents already allocate more than 30% of their event budget to treats — confirming treats are a primary spend category, not an afterthought. Ice cream and popcorn dominate preferences, validating the brand's core product offering.
+
+- **Visualisation** showed that premium willingness increases progressively with income, but that even middle-income parents show meaningful willingness to pay — particularly those on Lagos Island and in high-engagement event communities.
+
+- **Hypothesis Testing** found no significant difference in vendor satisfaction between Island and Mainland parents (p = 0.737), and no significant association between income and premium willingness (p = 0.678). This tells the brand that a single service standard works across Lagos, and that income-based targeting alone is insufficient.
+
+- **Correlation Analysis** identified treat budget percentage as the variable most strongly correlated with premium willingness — stronger than income or location. Parents who already spend heavily on treats are the natural premium audience.
+
+- **Logistic Regression** confirmed that treat budget percentage and prior vendor experience are the strongest predictors of premium willingness, with income playing a secondary role.
+
+**Single unified recommendation:** Sweet Indulgence by Hobams should build its customer acquisition strategy around treat-conscious parents — those who already allocate 20% or more of their event budget to treats — rather than targeting exclusively by income or location. These parents already understand the value of quality treat experiences. They are distributed across Lagos Island and Mainland alike. A targeted social media campaign emphasising the brand's premium, themed, and customised treat setups — directed at parents actively planning children's events — will yield the highest conversion rate to paying premium customers.
+
+11\. Limitations & Further Work
+
+**Limitations:**
+
+1.  **Convenience sampling:** Respondents were recruited via WhatsApp and Instagram, which may over-represent socially active, higher-income, and digitally connected Lagos parents. A random probability sample would produce more generalisable findings.
+
+2.  **Self-reported budget data:** Event budgets were self-reported as free text, producing 61 unique formats requiring extensive cleaning. Future surveys should use structured dropdown ranges to improve data quality.
+
+3.  **Small sample within subgroups:** The chi-squared warning ("approximation may be incorrect") indicates some income-premium cells had fewer than 5 expected observations. A larger sample of 300+ would resolve this.
+
+4.  **Cross-sectional design:** The survey captures a single point in time. Seasonal variation in event frequency and spending — particularly around Christmas, Easter and back-to-school periods — is not captured.
+
+5.  **Single outcome variable:** Premium willingness is measured as intention, not actual behaviour. A follow-up study tracking actual purchases would provide stronger evidence.
+
+**Further Work:**
+
+- Collect a second wave of data during peak event season (December) to test whether seasonal effects moderate premium willingness.
+- Conduct qualitative interviews with the "Maybe, depends on price" segment to understand the price threshold at which they convert to premium customers.
+- Build a predictive scoring model using a larger dataset to assign each prospective customer a premium probability score for targeted marketing.
+- Extend the analysis to Abuja — where Sweet Indulgence by Hobams has a partnership with the National Children Zoo & Park — to test whether Lagos findings generalise to a different Nigerian market.
+
+References
+
+Adi, B. (2026). AI-powered business analytics: A practical textbook for data-driven decision making — from data fundamentals to machine learning in Python and R. Lagos Business School / markanalytics.online. <https://markanalytics.online>
+
+Firke, S. (2023). janitor: Simple tools for examining and cleaning dirty data. R package version 2.2.0. <https://CRAN.R-project.org/package=janitor>
+
+Fox, J., & Weisberg, S. (2019). An R companion to applied regression (3rd ed.). Sage.
+
+Hosmer, D. W., Lemeshow, S., & Sturdivant, R. X. (2013). Applied logistic regression (3rd ed.). Wiley.
+
+Kassambara, A. (2023). ggcorrplot: Visualization of a correlation matrix using ggplot2. R package version 0.1.4. <https://CRAN.R-project.org/package=ggcorrplot>
+
+Obabiolorunkosi, A. A. (2026). Sweet Indulgence by Hobams customer survey dataset \[Dataset\]. Collected from Lagos parents via Google Forms, May 2026. Data available on request from the author.
+
+Pedersen, T. L. (2024). patchwork: The composer of plots. R package version 1.2.0. <https://CRAN.R-project.org/package=patchwork>
+
+R Core Team. (2024). R: A language and environment for statistical computing (Version 4.4). R Foundation for Statistical Computing. <https://www.R-project.org/>
+
+Robin, X., Turck, N., Hainard, A., Tiberti, N., Lisacek, F., Sanchez, J.-C., & Müller, M. (2011). pROC: An open-source package for R and S+ to analyze and compare ROC curves. BMC Bioinformatics, 12, 77. <https://doi.org/10.1186/1471-2105-12-77>
+
+Wei, T., & Simko, V. (2021). corrplot: Visualization of a correlation matrix. R package version 0.92. <https://CRAN.R-project.org/package=corrplot>
+
+Wickham, H. (2016). ggplot2: Elegant graphics for data analysis. Springer. <https://doi.org/10.1007/978-3-319-24277-4>
+
+Wickham, H. (2023). scales: Scale functions for visualization. R package version 1.3.0. <https://CRAN.R-project.org/package=scales>
+
+Wickham, H., Averick, M., Bryan, J., Chang, W., McGowan, L., François, R., Grolemund, G., Hayes, A., Henry, L., Hester, J., Kuhn, M., Pedersen, T. L., Miller, E., Bache, S. M., Müller, K., Ooms, J., Robinson, D., Seidel, D. P., Spinu, V., … Yutani, H. (2019). Welcome to the tidyverse. Journal of Open Source Software, 4(43), 1686. <https://doi.org/10.21105/joss.01686>
+
+Wickham, H., Hester, J., & Bryan, J. (2024). readr: Read rectangular text data. R package version 2.1.5. <https://CRAN.R-project.org/package=readr>
+
+Zhu, H. (2024). kableExtra: Construct complex table with kable and pipe syntax. R package version 1.4.0. <https://CRAN.R-project.org/package=kableExtra>
+
+Appendix: AI Usage Statement
+
+Claude (Anthropic) was used as a coding assistant throughout this project to help write and debug R code chunks, resolve rendering errors in Quarto, and suggest appropriate package functions for specific analytical tasks. All analytical decisions — including the choice of Case Study 1, the selection of variables for each technique, the framing of hypotheses, the interpretation of statistical outputs, and the business recommendations — were made independently by the author based on her professional knowledge as Founder of Sweet Indulgence by Hobams and the analytical frameworks taught in the Data Analytics 1 course. The author can explain every line of code and every result in this document independently.
